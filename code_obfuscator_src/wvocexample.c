@@ -24,6 +24,8 @@ int struct_total_num = 0;
 int custom_type_count = 0;   
 int custom_func_whitelist_count = 0;   
 int custom_file_whitelist_count = 0;
+int custom_decl_prefix_count = 0;
+int custom_var_whitelist_count = 0;
 int fileCount = 0;
 char filetxt[FILE_MAX_SIZE + 512];
 char* modifle[5000][3];  
@@ -34,6 +36,8 @@ char* global_struct_names[MAX_FUNCTIONS];
 char custom_return_types[MAX_CUSTOM_TYPES][MAX_TYPE_NAME_LENGTH];
 char custom_func_whitelist[MAX_CUSTOM_TYPES][MAX_TYPE_NAME_LENGTH];
 char custom_file_whitelist[MAX_CUSTOM_TYPES][MAX_TYPE_NAME_LENGTH];
+char custom_decl_prefixes[MAX_CUSTOM_TYPES][MAX_TYPE_NAME_LENGTH];
+char custom_var_whitelist[MAX_CUSTOM_TYPES][MAX_TYPE_NAME_LENGTH];
 
 FILE* compare_file;
 
@@ -44,7 +48,9 @@ typedef enum {
 	SECTION_NONE,
 	SECTION_FILE_WHITELIST,
 	SECTION_FUNC_WHITELIST,
-	SECTION_CUSTOM_TYPES  
+	SECTION_CUSTOM_TYPES,
+	SECTION_DECL_PREFIXES,
+	SECTION_VAR_WHITELIST
 } ConfigSection;
 
 // 读取配置文件
@@ -101,6 +107,14 @@ int load_whitelist_config(const char* config_path) {
 				current_section = SECTION_CUSTOM_TYPES;
 				printf("  开始解析【自定义类型】段\n");
 			}
+			else if (_stricmp(section_name, "DeclPrefixes") == 0) {  // 新增：声明前缀段
+				current_section = SECTION_DECL_PREFIXES;
+				printf("  开始解析【自定义声明前缀】段\n");
+			}
+			else if (_stricmp(section_name, "VarWhitelist") == 0) {  // 新增：变量保护名单段
+				current_section = SECTION_VAR_WHITELIST;
+				printf("  开始解析【变量保护名单】段\n");
+			}
 			else {
 				printf("警告：第%d行未知配置段 [%s]，跳过\n", line_num, section_name);
 				current_section = SECTION_NONE;
@@ -147,6 +161,32 @@ int load_whitelist_config(const char* config_path) {
 			custom_type_count++;
 			break;
 
+		case SECTION_DECL_PREFIXES:  // 新增：自定义声明前缀解析逻辑
+			// 检查自定义前缀数组边界
+			if (custom_decl_prefix_count >= MAX_CUSTOM_TYPES) {
+				printf("警告：自定义前缀数组已达上限(%d)，跳过第%d行：%s\n",
+					MAX_CUSTOM_TYPES, line_num, p);
+				break;
+			}
+			// 存入自定义前缀数组
+			strcpy_s(custom_decl_prefixes[custom_decl_prefix_count], MAX_TYPE_NAME_LENGTH, p);
+			printf("    新增自定义前缀：%s\n", custom_decl_prefixes[custom_decl_prefix_count]);
+			custom_decl_prefix_count++;
+			break;
+
+		case SECTION_VAR_WHITELIST:  // 新增：变量保护名单解析逻辑
+			// 检查数组边界
+			if (custom_var_whitelist_count >= MAX_CUSTOM_TYPES) {
+				printf("警告：变量保护名单数组已达上限(%d)，跳过第%d行：%s\n",
+					MAX_CUSTOM_TYPES, line_num, p);
+				break;
+			}
+			// 存入保护名单
+			strcpy_s(custom_var_whitelist[custom_var_whitelist_count], MAX_TYPE_NAME_LENGTH, p);
+			printf("    新增保护变量：%s\n", custom_var_whitelist[custom_var_whitelist_count]);
+			custom_var_whitelist_count++;
+			break;
+
 		default:
 			printf("警告：第%d行内容不属于任何有效段，跳过：%s\n", line_num, p);
 			break;
@@ -159,6 +199,8 @@ int load_whitelist_config(const char* config_path) {
 	printf("  - 解析自定义类型：%d 个\n", custom_type_count);    // 新增
 	printf("  - 解析文件白名单：%d 个\n", custom_file_whitelist_count);
 	printf("  - 解析函数白名单：%d 个\n", custom_func_whitelist_count);
+	printf("  - 解析自定义前缀：%d 个\n", custom_decl_prefix_count);
+	printf("  - 解析变量保护名单：%d 个\n", custom_var_whitelist_count);
 	return 0;
 }
 
@@ -483,13 +525,31 @@ int extract_variable_name_enhanced(const char* line, char* variable_name) {
 
 		// 检查常见的前缀关键字（如 static, const, extern 等）
 		const char* prefixes[] = { "static const","static volatile","extern const", "static", "const", "extern", "volatile", "register","auto", NULL };
-		for (i = 0; prefixes[i] != NULL; i++) {
-			int len = strlen(prefixes[i]);
-			if (strncmp(p, prefixes[i], len) == 0 && (isspace((unsigned char)p[len]) || p[len] == '*')) {
-				// 跳过前缀和空白
-				p += len;
-				while (isspace((unsigned char)*p)) p++;
-				break;
+		/* 循环剥前缀，支持 NVoC_DATA const 等多前缀组合 */
+		int removed = 1;
+		while (removed) {
+			removed = 0;
+			/* 先查自定义前缀（来自 [DeclPrefixes] 配置，如 NVoC_DATA 等宏前缀） */
+			for (i = 0; i < custom_decl_prefix_count; i++) {
+				int len = strlen(custom_decl_prefixes[i]);
+				if (strncmp(p, custom_decl_prefixes[i], len) == 0 && (isspace((unsigned char)p[len]) || p[len] == '*')) {
+					p += len;
+					while (isspace((unsigned char)*p)) p++;
+					removed = 1;
+					break;
+				}
+			}
+			/* 再查内置前缀 */
+			if (!removed) {
+				for (i = 0; prefixes[i] != NULL; i++) {
+					int len = strlen(prefixes[i]);
+					if (strncmp(p, prefixes[i], len) == 0 && (isspace((unsigned char)p[len]) || p[len] == '*')) {
+						p += len;
+						while (isspace((unsigned char)*p)) p++;
+						removed = 1;
+						break;
+					}
+				}
 			}
 		}
 
@@ -750,7 +810,16 @@ int detect_variables_from_text(const char* text, int text_size, char** variable_
 					}
 				}
 
-				if (!duplicate && strlen(variable_name) > 0) {
+				// 检查是否命中变量保护名单（[VarWhitelist] 配置），命中则不混淆
+				int in_var_whitelist = 0;
+				for (int k = 0; k < custom_var_whitelist_count; k++) {
+					if (strcmp(variable_name, custom_var_whitelist[k]) == 0) {
+						in_var_whitelist = 1;
+						break;
+					}
+				}
+
+				if (!duplicate && strlen(variable_name) > 0 && !in_var_whitelist) {
 					variable_names[variable_count] = (char*)malloc(strlen(variable_name) + 1);
 					if (variable_names[variable_count]) {
 						strcpy(variable_names[variable_count], variable_name);
@@ -2072,7 +2141,38 @@ int main0(int argc, char* argv[], char nvocplusfileinPath[8][256], char nvocplus
 									if (is_define) {
 										if (j >= macro_name_start && j < macro_name_end) continue;
 									} else {
-										continue;
+										/* 通用规则：#pragma 指令名(第一个标识符, ...) 的第一个标识符参与替换，
+										   用于 #pragma DATA_SECTION(变量名, ".section") 等变量声明场景 */
+										int allow_pp_replace = 0;
+										long int pp_line_start = 0;
+										long int pp_line_end = j;
+										long int s3;
+										for (s3 = j - 1; s3 >= 0; s3--) {
+											if (filetxt[s3] == '\n') { pp_line_start = s3 + 1; break; }
+										}
+										while (pp_line_end < totalsize && filetxt[pp_line_end] != '\n') pp_line_end++;
+										long int pp2 = pp_line_start;
+										while (pp2 < pp_line_end && (filetxt[pp2] == ' ' || filetxt[pp2] == '\t')) pp2++;
+										if (pp2 < pp_line_end && filetxt[pp2] == '#' && strncmp(filetxt + pp2, "#pragma", 7) == 0) {
+											/* 跳过 #pragma 指令名 */
+											long int pp = pp2 + 7;
+											while (pp < pp_line_end && (filetxt[pp] == ' ' || filetxt[pp] == '\t')) pp++;
+											while (pp < pp_line_end && (isalnum((unsigned char)filetxt[pp]) || filetxt[pp] == '_')) pp++;
+											while (pp < pp_line_end && (filetxt[pp] == ' ' || filetxt[pp] == '\t')) pp++;
+											/* 定位第一个括号参数内的标识符 [pp_start, pp_end) */
+											if (pp < pp_line_end && filetxt[pp] == '(') {
+												pp++;
+												while (pp < pp_line_end && (filetxt[pp] == ' ' || filetxt[pp] == '\t')) pp++;
+												long int pp_start = pp;
+												while (pp < pp_line_end && (isalnum((unsigned char)filetxt[pp]) || filetxt[pp] == '_')) pp++;
+												long int pp_end = pp;
+												/* C 标识符必须以字母/下划线开头 */
+												if (pp_start < pp_end && (isalpha((unsigned char)filetxt[pp_start]) || filetxt[pp_start] == '_')) {
+													if (j >= pp_start && j < pp_end) allow_pp_replace = 1;
+												}
+											}
+										}
+										if (!allow_pp_replace) continue;
 									}
 								}
 								/* skip string literals unless in #include */
